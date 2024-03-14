@@ -1,0 +1,490 @@
+---
+title: '<center> Unmasking Maternal Despair: A Prognostic Exploration of Postpartum Depression and Suicide Attempts <center>'
+author: '<center> Radosław Dawidowski, Aleksandra Hryncyszyn <center>'
+date: '<center> `r Sys.Date()` <center>'
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk $ set( echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, fig.align = 'center'  )
+```
+
+# Introduction
+
+Maternal mortality rates serve as a crucial barometer of a nation's overall public health and have direct influence on the population growth. In the United States, efforts have been initiated to enhance the quality of data through the establishment of maternal mortality review panels in selected states. Concurrently, ongoing research is investigating the utility of natural language processing techniques for predicting perinatal suicide risk by analyzing clinical notes. Addressing maternal mortality entails the implementation of critical interventions, such as universal screening for perinatal depression and substance use disorder, along with the integration of mental health services into primary and prenatal care. Healthcare professionals should maintain heightened vigilance concerning potential risk factors, encompassing mental health diagnoses, substance use challenges, interpersonal violence, a history of abuse, and inadequate social support. Recommendations from Maternal Mortality Review Committees (MMRCs) play a pivotal role in guiding strategies to mitigate maternal mortality, including suicide prevention (Chin et al., 2022).
+
+In this project, our objective is to contribute to the reduction of maternal mortality rates, specifically in the context of suicide. Many women encounter postpartum depression, yet access to necessary mental health support often remains insufficient. To address this gap and identify early-stage suicide risk, we propose the development of an algorithm predicated on a simple survey. This algorithm will serve as an invaluable tool for promptly detecting women at risk of suicidal thoughts, empowering hospitals to provide timely and essential assistance for addressing the mental health challenges faced by postpartum women. 
+
+```{r}
+library( readr )    #For reading csv file
+library( Hmisc )    # For missing values
+library( plyr )     # For the 'mutate' function
+library( naniar )   # For visualizing missing values
+library( ggplot2 )    # For visualization
+
+library( rpart )         # For the "CART" algorithm
+library( rpart.plot )    # To plot decision trees
+library( C50 )           # For the "C5.0" algorithm
+library( randomForest )  # For the "Random Forest" algorithm
+
+library( pROC )          # For ROC plot
+library( liver )
+library(knitr)           # For tables
+library(kableExtra)      # For tables customization
+```
+
+# Data Understanding Stage
+
+Firstly, we import the dataset from the csv file and display the overview of its variables using `str` function:
+
+```{r}
+data_csv = read_csv('postnatal_depression.csv', show_col_types = FALSE)
+str(data_csv)
+```
+The dataset is an S3 table containing `r nrow(data_csv)` entries and `r ncol(data_csv)` variables, one of which is a timestamp. To simplify the data, we're going to convert it to a dataframe that omits the first column, includes only definitive answers ("Yes", or "No") for the target variable `suicide.attempt`, and has more concise column names:
+
+```{r}
+#convert data_csv to the dataframe that omits the first column of data_csv
+data = data.frame(data_csv[ , 2:ncol(data_csv)])
+
+#include only definitive answers
+data = data[data$Suicide.attempt != 'Not interested to say', ]
+
+#change the names of the variables to shorter alternatives
+names(data) = c("age", "sad.or.tearful", "irritable", "trouble.sleeping", "problems.concentrating", "trouble.appetite", "anxious", "guilt", "trouble.baby.bonding", "suicide.attempt")
+str(data)
+```
+Now we have a dataframe `data` with `r nrow(data)` entries and `r ncol(data)` variables, namely:
+
+ * `age`                   : categorical ordinal - the age of the woman.
+ * `sad.or.tearful`        : categorical ordinal - whether the woman feels sad or tearful. 
+ * `irritable`             : categorical ordinal - whether the woman is irritable towards the baby or her partner.
+ * `trouble.sleeping`      : categorical ordinal - whether the woman has trouble sleeping at night.
+ * `problems.concentrating`: categorical ordinal - whether the woman has problems concentrating or making decisions
+ * `trouble.appetite`      : categorical ordinal - whether the woman overeats or has a loss of appetite.
+ * `anxious`               : categorical binary - whether the woman feels anxious.
+ * `guilt`                 : categorical ordinal - whether the woman has feelings of guilt.
+ * `trouble.baby.bonding`  : categorical ordinal - whether the woman has problems bonding with the baby.
+ * `suicide.attempt`       : categorical binary - whether the woman has had a suicide attempt.
+ 
+To conclude, our dataset contains 1 variable describing the woman's age category, `r nrow(data) - 2` variables about her feelings and condition, and 1 binary target variable `suicide.attempt`. 
+
+Finally, we are going to check for the missing values in the data:
+```{r}
+gg_miss_var(data, show_pct = TRUE)
+```
+From the graph we can notice that there are missing values for three variables: around 0.5% for `irratable`, around 0.75% for `guilt`, and around 1% for `problems.concentrating`. It turns out that it sums to only `r sum(rowSums(is.na(data)) > 0)` entries, so we are going to delete them from our dataset:
+
+```{r}
+# Remove rows with missing values
+data = na.omit(data)
+
+# Check for missing values and create a missing data visualization
+gg_miss_var(data, show_pct = TRUE)
+```
+Now we can clearly see that there are no missing values, therefore we can proceed to visualize the data and extract useful conclusions from it.
+
+# Exploratory Data Analysis (EDA)
+
+In this section we're going to use graphs to visualize the correlation (or the lack of it) between `r nrow(data) - 1` predictor variables and the target `suicide.attempt`.
+
+## Investigate the target variable *suicide attempt*
+
+```{r fig.height = 5, fig.width = 5}
+ggplot( data = data, aes( x = suicide.attempt, label = scales::percent( prop.table( stat( count ) ) ) ) ) +
+    geom_bar( fill = c( "seagreen", "tomato3" ) ) + 
+    geom_text( stat = 'count', vjust = 0.2, size = 6 )
+```
+The first bar plot portrays that as much as 39% of the women that took part in the study have had a suicide attempt. 
+
+```{r}
+table( data $ suicide.attempt )
+```
+From the `table` function we can see thata the exact numbers are 453 women that have had a suicide attempt and 703 that haven't.
+
+## Investigate the variable *age*
+
+As the `age` variable is categorical ordinal, we will display its distribution along with the proportion of target variable values using a bar plot:
+
+```{r}
+data$age = factor(data$age)
+data$suicide.attempt = factor(data$suicide.attempt)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = age, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+It can be observed that the highest proportion of suicide attempts, around `r round(100*nrow(data[data$age == "25-30" & data$suicide.attempt == "Yes", ]) / nrow(data[data$age == "25-30", ]), 3)`%, was within the youngest category from 25 to 30 years old. Then, the proportion is by approximately 10 percent points lower for the next category (30-35), but then slightly increases again for 35-40. Subsequently, 40-45 year old have the same proportion as the previous category. Lastly, the 45-50 category has the lowest proportion around `r round(100*nrow(data[data$age == "45-50" & data$suicide.attempt == "Yes", ]) / nrow(data[data$age == "45-50", ]), 3)`%. 
+
+## Investigate the variable *sad.or.tearful*
+
+Next variable, `sad.or.tearful`, is categorical ordinal, therefore we're going to visualize it, along with the proportion of suicide attempts in each group, using a bar plot:
+
+```{r}
+data$sad.or.tearful = factor(data$sad.or.tearful)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = sad.or.tearful, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+Counterintuitively, the plot portrays that actually the women that haven't experienced sad or tearful feelings after giving birth are much more likely to attempt a suicide than women that have experienced them only sometimes. It might imply different conclusions - either this factor does not have any influence on the suicidal attempt, or the women that denied having those feelings were actually unconsciously suppressing them, which only lead to a decline in their mental condition. There might also be other interpretations and to verify any of them, further analysis should be conducted.
+
+## Investigate the variable *irritable*
+
+The variable `irritable` is also a categorical ordinal, therefore we're going to visualize it, along with the proportion of suicide attempts in each group, using a bar plot:
+
+```{r}
+data$irritable = factor(data$irritable)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = irritable, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+There is a clear positive correlation between the frequency of feeling irritable towards their baby or partner and the proportion of the suicide attempts of that women. It can be read from the plot that the women that answered 'Yes' had almost 30 percent points higher proportion of suicide attempts than the women that answered 'No' in that question.
+
+## Investigate the variable *trouble.sleeping*
+
+Another variable, `trouble.sleeping`, is also a categorical ordinal, therefore we're going to visualize it, along with the proportion of suicide attempts in each group, using a bar plot:
+
+```{r}
+data$trouble.sleeping = factor(data$trouble.sleeping)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = trouble.sleeping, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+The plot reveals that women who didn't have any trouble with sleeping at night had the suicide attempt proportion a little lower than 25%. In contrast, those who reported experiencing sleep difficulties had a notably higher proportion, standing at approximately 38%. However, the most striking finding emerges from women who reported experiencing sleep troubles on at least two days a week, but not every day. For this subgroup, the suicide attempt proportion was as high as 51%.
+
+## Investigate the variable *problems.concentrating*
+
+We will also examine the variable 'problems.concentrating,' which is a categorical ordinal variable. To gain insights into this variable, we will create a bar plot that visualizes the distribution of suicide attempt proportions within each group:
+
+```{r}
+data$problems.concentrating = factor(data$problems.concentrating)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = problems.concentrating, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+The plot clearly visualizes that women that have had problems concentrating have a higher proportion of suicide attempts (around 63%) than women that haven't had (around 44%). However, the women that had problems concentrating often, but not always, actually have the lowest proportion of suicide attempts (around 13%).
+
+## Investigate the variable *trouble.appetite*
+
+Now, we're going to visualize the categorical ordinal variables 'trouble.appetite` using a bar plot:
+
+```{r}
+order = c("Not at all", "No", "Yes")
+data$trouble.appetite = factor(data$trouble.appetite, levels = order)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = trouble.appetite, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+The plot portrays that the proportion of the suicide attempts isn't strongly dependent on whether the woman had trouble with appetite or not. Actually, it can be noticed that the category that didn't usually have trouble with neither overeating nor loss of appetite had a slightly higher proportion of suicide attempts (by `r round(100*nrow(data[data$trouble.appetite == "No" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.appetite == "No", ]) - 100*nrow(data[data$trouble.appetite == "Yes" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.appetite == "Yes", ]), 3) ` percent points) than those women that had those issues.
+
+## Investigate the variable *anxious*
+
+Subsequently, we're going to investigate the categorical binary variables `anxious` via the bar plot:
+
+```{r}
+data$anxious = factor(data$anxious)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = anxious, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+The plot reveals that the proportion of suicidide attempts within both groups doesn't really differ, therefore the variable `anxious` is not correlated with `suicide.attempt`.
+
+## Investigate the variable *guilt*
+
+Then, we're going to visualize the categorical ordinal variables `guilt` using a bar plot:
+
+```{r}
+order = c("No", "Maybe", "Yes")
+data$guilt = factor(data$guilt, levels = order)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = guilt, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+It can be noticed that the suicide attempts proportion is the highest among women that experienced the feeling of guilt - as high as `r round(100*nrow(data[data$guilt == "Yes" & data$suicide.attempt == "Yes", ]) / nrow(data[data$guilt == "Yes", ]), 3) ` percent. What is surprising, the lowest proportion is not among women that haven't experienced that feeling, but among those that chose the 'Maybe' option is the questionnaire - only `r round(100*nrow(data[data$guilt == "Maybe" & data$suicide.attempt == "Yes", ]) / nrow(data[data$guilt == "Yes", ]), 3) ` percent, which is lower then the proportion within the group of women that chose option "No" by `r round(100*nrow(data[data$guilt == "No" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.appetite == "No", ]) - 100*nrow(data[data$trouble.appetite == "Yes" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.appetite == "Yes", ]), 3)` percent points. Similarly as with the sad of tearful feelings, this data might either imply that women that chose "No" were suppressing those feelings, or that this variables is not correlated with `suicide.attempt`.
+
+## Investigate the variable *trouble.baby.bonding*
+
+Lastly, we're going to investigate the categorical ordinal variable `trouble.baby.bonding` by means of bar plot:
+```{r}
+data$trouble.baby.bonding = factor(data$trouble.baby.bonding)
+
+ggplot( data = data ) + 
+  geom_bar( aes( x = trouble.baby.bonding, fill = suicide.attempt ), position = "fill" ) +
+  scale_fill_manual( values = c( "seagreen", "tomato3" ) )
+```
+Counterintuitively, it turns out that women that haven't had any trouble bonding with the baby had actually slightly higher (by `r round(100*nrow(data[data$trouble.baby.bonding == "No" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.baby.bonding == "No", ]) - 100*nrow(data[data$trouble.baby.bonding == "Yes" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.baby.bonding == "Yes", ]), 3)`percent points) suicide attempt proportion than those that had those issues. Similarly as in the other variables, it can be observed that the lowest proportion was within the women that had experienced those difficulties only sometimes - as low as `r round(100*nrow(data[data$trouble.baby.bonding == "Yes" & data$suicide.attempt == "Yes", ]) / nrow(data[data$trouble.baby.bonding == "Yes", ]), 3)` percent.
+
+
+## Detect Correlated Variables 
+
+
+# Data Preparation
+
+In this phase, our objective is to prepare the dataset for modeling purposes. Firstly, we're going to convert categorical variables into flag variables:
+
+```{r}
+# Convert "suicide.attempt" to a binary numeric variable (0 or 1)
+data$suicide.attempt = ifelse(data$suicide.attempt == "Yes", 1, 0)
+
+# Convert "suicide.attempt" to a factor with specified levels and labels
+data$suicide.attempt <- factor(data$suicide.attempt, levels = c(0, 1), labels = c(0, 1))
+
+# Convert other binary variables to 0 or 1 (0 for "No", 1 for "Yes")
+data$anxious = ifelse(data$anxious == "Yes", 1, 0)
+
+# Convert categorical ordinal variables to three leves (0 for "No", 2 for "Yes", and 1 for an in-between value like "Sometimes")
+data$sad.or.tearful = ifelse(data$sad.or.tearful == "No", 0, ifelse(data$sad.or.tearful == "Yes", 2, 1))
+
+data$trouble.appetite = ifelse(data$trouble.appetite == "Not at all", 0, ifelse(data$trouble.appetite == "Yes", 2, 1))
+
+data$irritable = ifelse(data$irritable == "No", 0, ifelse(data$irritable == "Yes", 2, 1))
+
+data$trouble.sleeping = ifelse(data$trouble.sleeping == "No", 0, ifelse(data$trouble.sleeping == "Yes", 2, 1))
+
+data$problems.concentrating = ifelse(data$problems.concentrating == "No", 0, ifelse(data$problems.concentrating == "Yes", 2, 1))
+
+data$guilt = ifelse(data$guilt == "No", 0, ifelse(data$guilt == "Yes", 2, 1))
+
+data$trouble.baby.bonding = ifelse(data$trouble.baby.bonding == "No", 0, ifelse(data$trouble.baby.bonding == "Yes", 2, 1))
+```
+
+Subsequently, we employ random partitioning of the postnatal_depression dataset into two distinct groups: an 80% portion designated as the training set and a separate 20% portion assigned to the test set. This partitioning process is facilitated through the utilization of the `partition()` function from the liver package:
+
+``` {r}
+set.seed( 2137 )
+
+data_sets <- partition( data = data, prob = c( 0.8, 0.2 ) )
+
+train_set <- data_sets $ part1
+test_set  <- data_sets $ part2
+
+actual_test <- test_set $ suicide.attempt
+```
+
+We have incorporated the set.seed() function to ensure the reproducibility of our results. Our validation process involves an examination of whether the proportion of the target variable 'suicide.attempt' differs between the two data sets. To accomplish this, we employ a Two-Sample Z-Test for comparing proportions. This choice is appropriate because we aim to assess the differences in the proportion of women who have attempted suicide between the "training set" and the "test set". Our hypotheses are as follows:
+
+\[
+\bigg\{
+\begin{matrix}
+          H_0:  \pi_{suicide.attempt, train} = \pi_{suicide.attempt, test} \\
+          H_a:  \pi_{suicide.attempt, train} \neq \pi_{suicide.attempt, test}
+\end{matrix}
+\]
+We're going to verify those hypotheses using a `prop.test` function:
+
+``` {r}
+x1 = sum( train_set $ suicide.attempt == 1 )
+x2 = sum( test_set  $ suicide.attempt == 1 )
+
+n1 = nrow( train_set )
+n2 = nrow( test_set  )
+
+prop.test( x = c( x1, x2 ), n = c( n1, n2 ) )
+
+```
+We do not reject the null hypothesis (H_{0}) as the p-value equal to 0.9646 exceeds the significance level ( \alpha = 0.05). Therefore, we conclude that the difference in the proportion of women who have had a suicide attempt is not statistically significant between the two groups, namely the "training set" and the "test set." This outcome affirms the validity of the partitioning for the target variable 'suicide.attempt.'
+
+In this context, we aim to employ various Machine Learning algorithms using the predictors mentioned above, based on the training dataset. We will utilize the following formula for our modeling process:
+
+```{r}
+formula = suicide.attempt ~ sad.or.tearful + irritable + trouble.sleeping + problems.concentrating + trouble.appetite + anxious + guilt + trouble.baby.bonding
+```
+
+
+# Modeling - Classification
+
+To determine the optimal value of k based on the Error Rate, we iterate through different k values ranging from 1 to 30. For each k value, we run the k-nearest neighbor model on the test set and calculate the associated Error Rate. This process is executed using the kNN.plot() command.
+
+```{r}
+kNN.plot( formula, train = train_set, test = test_set, 
+          k.max = 30, set.seed = 123 )
+```
+
+Upon reviewing the plot, it's challenging to make a rational decision regarding the choice of k, as the error rate is minimal when k = 1, which could lead to overfitting. Consequently, we opt for k = 9, where the error rate remains low while maintaining a more reasonable k value.
+
+```{r}
+predict_knn = kNN( formula, train = train_set, test = test_set, k = 9 )
+```
+
+
+## Classificaiton with Decision Tree by CART algorithm
+
+We generate a decision tree utilizing the CART algorithm using `rpart` function from the rpart package:
+
+```{r}
+tree_cart = rpart( formula, data = train_set, method = "class" )
+```
+
+For visualizing the decision tree, we employ the `rpart.plot` function from the same package:
+
+```{r}
+rpart.plot( tree_cart, type = 4, extra = 104 )
+```
+The generated decision tree has 7 levels, 21 decision nodes, and 22 leaves. Three of the leaves are pure, and the largest error rate is equal to 35% and stems from the leave that corresponds to 5% of the dataset. 
+
+## Classificaiton with Decision Tree by C50 algorithm
+
+We generate a decision tree using the C5.0 algorithm by employing the C5.0 function from the C50 package:
+```{r}
+tree_C50 = C5.0( formula = formula, data = train_set, type = "class" ) 
+```
+
+As the tree generated by the C5.0 algorithm is fairly extensive and challenging to visualize, we opt to utilize the summary function in the following manner:
+```{r}
+summary(tree_C50)
+```
+
+## Classificaiton with Random Forest
+
+The CART and C5.0 algorithms generate a single decision tree using all records and the specified variables within the training dataset. In contrast, the random forest algorithm constructs multiple decision trees and combines the distinct classifications of each tree for each record to determine the final classification.
+
+``` {r}
+set.seed(17)
+random_forest = randomForest( formula = formula, data = train_set, ntree = 100 )
+```
+
+To determine the optimal number of trees to use, we plot the random forest and identify the point at which the error rate is minimized.
+```{r}
+plot( random_forest )
+```
+It can be observed, that the error rate is slowly declining from 0 to 40 trees, then oscillates a little above the 0.05 value, slightly going down around 100 trees. Therefore, we choose to stay with the number of 100 trees.
+
+## Classificaiton with Logistic Regression 
+
+To execute the logistic regression model, we will utilize the glm() command.
+```{r}
+logreg = glm( formula, data = data, family = binomial )
+```
+
+To see the output of the regression, we're going use `summary` function:
+```{r}
+summary( logreg)
+prob_logreg = predict( logreg, test_set, type = "response" )
+```
+From the summary we can notice that three of the variables: `trouble.apetite`, `anxious`, and  `trouble.baby.bonding` are not significant. Regarding the rest, the `sad.or.tearful` variable has a negative coefficient, whereas the rest has positive ones. This portrays the unusual trend in the data, where women that reported being never sad or tearful had actually higher proportion of suicide attempts.
+
+# Model Evaluation
+To quantify the performance of each algorithm and compare them, we're going to use confusion matrixes, mean-squared error (MSE), as well as receiver operating characteristic (ROC) curve along with the area under it (AUC). Firstly, for the kNN algorithm:
+
+``` {r}
+#kNN algorithm evaluation
+conf.mat(predict_knn, actual_test)
+conf.mat.plot( predict_knn, actual_test )
+( mse_knn = mse( actual_test, predict_knn ) )
+```
+From the confusion matrix we can conclude that kNN algorithm results in `115 + 64 = 179` correct predictions of our test set, `23` False Negatives, `18` False Positives, and MSE equal to 0.1863636.
+
+```{r}
+#CART algorithm evaluation
+predict_cart = predict( tree_cart, test_set, type = "class" )
+conf.mat.plot( predict_cart, actual_test )
+mse( predict_cart, actual_test )
+```
+From the confusion matrix we can conclude that CART decision tree model results in `120 + 73 = 193` correct predictions of our test set, `14` False Negatives, `13` False Positives, and MSE equal to 0.1227273.
+
+```{r}
+#C5.0 algorithm evaluation
+predict_C50 = predict( tree_C50, test_set, type = "class" )
+conf.mat.plot( predict_C50, actual_test )
+mse( predict_C50, actual_test )
+```
+It can be observed that the C5.0 decision tree model results in `117 + 67 = 184` correct predictions, `20` False Negatives, `16` False Positives, and MSE equal to 0.04090909.
+
+```{r}
+#Random forest algorithm evaluation
+predict_random_forest = predict( random_forest, test_set )
+conf.mat.plot( predict_random_forest, actual_test, main = "Random Forest" )
+mse( predict_random_forest, actual_test )
+```
+The matrix visualizes that the Random Forest algorithm made `130 + 82 = 212` correct predictions, `5` False Negatives, and `3` False Positives. Moreover, the MSE value is relatively low, equal to 0.03636364.
+
+```{r} 
+#linear regression algorithm evaluation
+predict_logreg = predict( logreg, test_set, type = "response" )
+
+#change the predicted values equal or higher than 0.5 to 1 and the ones lower than 0.5 to 0
+predict_logreg_classes = ifelse(predict_logreg >= 0.5, 1, 0)
+conf.mat( predict_logreg_classes, actual_test )
+conf.mat.plot( predict_logreg_classes, actual_test )
+( mse_cart = mse( predict_logreg_classes, actual_test ) )
+```
+Finally, linear regression results in `105 + 52 = 157` correct predictions, `35` False Negatives, `28` False Positives, and MSE equal to 1.35.
+
+Subsequently, we're going to plot ROC curves along with corresponding AUC values:
+
+```{r}
+#ROC plots
+library( pROC )  
+library( ggplot2 )  
+set.seed(17)
+prob_cart = predict( tree_cart, test_set, type = "prob" )[ , 1 ]
+prob_C50  = predict( tree_C50,  test_set, type = "prob" )[ , 1 ]
+
+prob_random_forest = predict( random_forest, test_set, type = "prob" )[ , 1 ]
+prob_knn = kNN( formula, train = train_set, test = test_set, transform = "minmax", k = 13, type = "prob" )[ , 1 ]
+prob_logreg  = predict( logreg,  test_set, type = "response" )
+
+roc_knn = roc( actual_test, prob_knn )
+roc_cart = roc( actual_test, prob_cart )
+roc_C50 = roc( actual_test, prob_C50 )
+roc_random_forest = roc( actual_test, prob_random_forest )
+roc_logreg = roc( actual_test, prob_logreg )
+
+ggroc( list( roc_knn, roc_cart, roc_C50, roc_random_forest, roc_logreg ), size = 0.8 ) + 
+    theme_minimal() + ggtitle( "ROC plots with AUC for 4 outcomes") +
+  scale_color_manual( values = 1:5, 
+    labels = c( paste( "KNN; AUC =", round( auc( roc_knn ), 3 ) ),
+                paste( "CART; AUC =", round( auc( roc_cart ), 3 ) ), 
+                paste( "C50; AUC =", round( auc( roc_C50 ), 3 ) ), 
+                paste( "Random Forest; AUC =", round( auc( roc_random_forest ), 3 ) ),
+                paste( "Log Reg; AUC =", round( auc( roc_logreg ), 3 ) )
+                ) ) +
+  theme( legend.title = element_blank() ) +
+  theme( legend.position = c( .7, .3 ), text = element_text( size = 17 ) )
+```
+To have a clear comparison of the algorithms, we're going to summarize all of the calculated values in a table:
+
+```{r}
+results = data.frame(
+  criteria = c("correct_predictions", "false_negatives", "false_positives", "MSE", "AUC"),
+  kNN = c(115+64, 23, 18, round(0.1863636, 4), 0.935),
+  CART = c(120+73, 14, 13, round(0.1227273, 4), 0.93),
+  C5.0 = c(117+67, 20, 16, round(0.04090909, 4), 0.988),
+  random_forest = c(130+82, 5, 3, round(0.03636364, 4), 0.997),
+  lin_regression = c(105+52, 35, 28, round(1.35, 4), 0.772)
+)
+
+centered_table = kable(t(results), format = "markdown", align = "c") %>%
+  kable_styling(full_width = FALSE)
+
+print(centered_table)
+```
+It can be clearly observed that the Random Forest algorithms had the most favorable scores in all of the categories, and an AUC value only 0.003 away from a perfect classifier. Slightly worse performance was achieved by the C5.0 decision tree.
+
+# Conclusions
+
+In conclusion, this research paper addressed the critical issue of maternal mortality, particularly in the context of postpartum suicide risk and specifically - the variables that correlate with it. Our objective was to develop an algorithm for early-stage risk identification to reduce maternal mortality rates. The study compared five classification algorithms, with the random forest method standing out as the most effective in correctly predicting risk.
+
+Apart from metal health challenges, maternal mortality is influenced also by other complex factors, including substance use disorders, interpersonal violence, and inadequate social support. To combat this issue, we recommend a holistic approach, involving universal screening for perinatal depression and substance use disorders as integral components of postpartum care. Enhancing access to mental health services is essential, and our algorithm can help healthcare professionals promptly identify women at risk.
+
+In summary, our research contributes to ongoing efforts to reduce maternal mortality rates. By combining advanced classification algorithms with a comprehensive maternal care approach, we can make significant strides in identifying and assisting women at risk of postpartum suicide, ultimately saving lives and enhancing public health. This work marks a step toward a future where maternal mortality is significantly reduced, prioritizing the well-being of postpartum women.
+
+# References
+
+Chin, K., Wendt, A., Bennett, I. M., & Bhat, A. (2022). Suicide and maternal mortality. Current Psychiatry Reports, 24(4), 239–275. https://doi.org/10.1007/s11920-022-01334-3
